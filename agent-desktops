@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# agent-desktops: one visible, persistent Chrome per project for AI coding agents,
+# each on its own virtual desktop, all watchable from one web page.
+#
+#   sudo ./agent-desktops setup            install packages, units, portal (once)
+#   sudo agent-desktops add <name>         new desktop + Chrome + web view
+#   sudo agent-desktops remove <name>      stop it and delete its settings (keeps the profile)
+#   agent-desktops list                    names, ports, status
+#   agent-desktops port <name>             the Chrome DevTools port, for scripts
+#
+# Settings: PREFIX (default "agent") names the units and folders, so two installs can live side
+# by side. AGENT_USER (default: the sudo user) owns the desktops and browser profiles.
+# PORTAL_PORT (default 6100) is the one web page that shows every desktop.
+set -euo pipefail
+
+PREFIX="${PREFIX:-agent}"
+AGENT_USER="${AGENT_USER:-${SUDO_USER:-$(id -un)}}"
+PORTAL_PORT="${PORTAL_PORT:-6100}"
+ETC="/etc/${PREFIX}-desktops"
+SHARE="/opt/${PREFIX}-desktops"
+UNITS="/etc/systemd/system"
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# Installed copy (/usr/local/bin) reads its templates from where setup put them.
+[ -d "$HERE/systemd" ] || HERE="/usr/local/share/${PREFIX}-desktops"
+
+die() { echo "agent-desktops: $*" >&2; exit 1; }
+need_root() { [ "$(id -u)" -eq 0 ] || die "run this with sudo"; }
+home_of() { getent passwd "$1" | cut -d: -f6; }
+
+# Ports come from the display number N, so they never need choosing:
+#   VNC 5900+N (localhost only), web view 6100+N, Chrome DevTools 9300+N (localhost only).
+ports_for() { local n=$1; echo "DISP=$n VNC=$((5900 + n)) WEB=$((6100 + n)) CDP=$((9300 + n))"; }
+
+port_free() { ! ss -ltn "( sport = :$1 )" | grep -q ":$1"; }
+
+next_display() {
+  local n=10
+  while :; do
+    local used=0
+    [ -e "/tmp/.X11-unix/X$n" ] && used=1
+    grep -qs "^DISP=$n\$" "$ETC"/*.env && used=1
+    for p in $((5900 + n)) $((6100 + n)) $((9300 + n)); do port_free "$p" || used=1; done
+    [ $used -eq 0 ] && { echo $n; return; }
+    n=$((n + 1))
+    [ $n -gt 60 ] && die "no free display between :10 and :60"
+  done
+}
+
+write_units() {
+  local home; home="$(home_of "$AGENT_USER")"
+  for f in desktop chrome novnc portal; do
+    sed -e "s#@USER@#${AGENT_USER}#g" -e "s#@HOME@#${home}#g" -e "s#@PREFIX@#${PREFIX}#g" \
+        -e "s#@ETC@#${ETC}#g" -e "s#@SHARE@#${SHARE}#g" -e "s#@PORTAL_PORT@#${PORTAL_PORT}#g" \
+        "$HERE/systemd/agent-$f.service.in" > "$UNITS/${PREFIX}-$f$([ $f = portal ] || echo @).service"
+  done
+  systemctl daemon-reload
+}
+
+write_portal_list() {
+  # desktops.json, read by the portal page: one entry per desktop.
+  local out="$SHARE/portal/desktops.json" first=1
+  {
+    echo "["
+    for env in "$ETC"/*.env; do
+      [ -e "$env" ] || continue
+      local name; name="$(basename "$env" .env)"
+      # shellcheck disable=SC1090
+      ( . "$env"; [ $first -eq 1 ] || echo ","; printf '  {"name": "%s", "label": "%s", "web": %s, "note": "CDP %s"}' \
+          "$name" "$name" "$WEB" "$CDP" )
+      first=0
+    done
+    echo; echo "]"
+  } > "$out"
+  chown "$AGENT_USER" "$out"
+}
+
+cmd_setup() {
+  need_root
+  id "$AGENT_USER" >/dev/null 2>&1 || die "user $AGENT_USER does not exist (set AGENT_USER)"
+  echo "Installing packages (TigerVNC, XFCE, noVNC, websockify)..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q tigervnc-standalone-server tigervnc-tools \
+      xfce4 xfce4-terminal dbus-x11 novnc websockify python3 >/dev/null
+  if ! command -v google-chrome >/dev/null; then
+    echo "Installing Google Chrome..."
+    local deb; deb="$(mktemp -d)/chrome.deb"
+    curl -fsSL -o "$deb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$deb" >/dev/null
+  fi
+
+  local home; home="$(home_of "$AGENT_USER")"
+  install -d -m 700 -o "$AGENT_USER" "$home/.vnc"
+  local pwfile="$home/.vnc/${PREFIX}-desktops.passwd" plain="$home/.vnc/${PREFIX}-desktops.password.txt"
+  if [ ! -f "$pwfile" ]; then
+    # 8 characters (the VNC limit) with no look-alikes (0/O, 1/l/I), so it can be typed from a screen.
+    ( umask 077; python3 -c "import secrets; a='ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789'; print(''.join(secrets.choice(a) for _ in range(8)), end='')" > "$plain" )
+    vncpasswd -f < "$plain" > "$pwfile"
+    chown "$AGENT_USER" "$pwfile" "$plain"; chmod 600 "$pwfile" "$plain"
+    echo "VNC password created. Read it with: sudo cat $plain"
+  fi
+  cat > "$home/.vnc/${PREFIX}-xstartup" <<'EOF'
+#!/bin/sh
+unset SESSION_MANAGER DBUS_SESSION_BUS_ADDRESS
+exec dbus-launch --exit-with-session startxfce4
+EOF
+  chown "$AGENT_USER" "$home/.vnc/${PREFIX}-xstartup"; chmod 700 "$home/.vnc/${PREFIX}-xstartup"
+
+  install -d -m 755 "$ETC"
+  install -d -m 755 -o "$AGENT_USER" "$SHARE/portal"
+  install -m 644 -o "$AGENT_USER" "$HERE/portal/index.html" "$SHARE/portal/index.html"
+  write_portal_list
+  install -m 755 "$HERE/agent-desktops" /usr/local/bin/${PREFIX}-desktops
+  install -d -m 755 /usr/local/share/${PREFIX}-desktops
+  cp -r "$HERE/systemd" "$HERE/portal" /usr/local/share/${PREFIX}-desktops/
+  write_units
+  systemctl enable --now "${PREFIX}-portal.service" >/dev/null 2>&1
+  echo "Done. Add a desktop: sudo ${PREFIX}-desktops add <name>"
+  echo "Portal: http://$(hostname -I | awk '{print $1}'):${PORTAL_PORT}/"
+}
+
+cmd_add() {
+  need_root
+  local name="${1:-}"
+  [[ "$name" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || die "name must be lowercase letters, digits and dashes"
+  [ -d "$ETC" ] || die "run setup first"
+  [ -e "$ETC/$name.env" ] && die "$name already exists"
+  local n; n="$(next_display)"
+  ports_for "$n" | tr ' ' '\n' > "$ETC/$name.env"
+  write_units
+  systemctl enable --now "${PREFIX}-desktop@$name" "${PREFIX}-chrome@$name" "${PREFIX}-novnc@$name" >/dev/null 2>&1
+  write_portal_list
+  # shellcheck disable=SC1090
+  . "$ETC/$name.env"
+  for _ in $(seq 1 40); do curl -fs "http://127.0.0.1:$CDP/json/version" >/dev/null && break; sleep 0.5; done
+  curl -fs "http://127.0.0.1:$CDP/json/version" >/dev/null || die "Chrome for $name did not start: journalctl -u ${PREFIX}-chrome@$name"
+  echo "$name: display :$DISP, Chrome DevTools 127.0.0.1:$CDP, watch http://$(hostname -I | awk '{print $1}'):$WEB/vnc.html"
+}
+
+cmd_remove() {
+  need_root
+  local name="${1:-}"
+  [ -e "$ETC/$name.env" ] || die "no desktop called $name"
+  systemctl disable --now "${PREFIX}-novnc@$name" "${PREFIX}-chrome@$name" "${PREFIX}-desktop@$name" >/dev/null 2>&1 || true
+  rm -f "$ETC/$name.env"
+  write_portal_list
+  echo "$name removed. Its browser profile (logins) is kept in $(home_of "$AGENT_USER")/.cache/${PREFIX}-chrome-$name"
+}
+
+cmd_list() {
+  [ -d "$ETC" ] || die "not set up"
+  printf "%-16s %-8s %-8s %-8s %s\n" NAME DISPLAY CDP WEB STATUS
+  for env in "$ETC"/*.env; do
+    [ -e "$env" ] || continue
+    local name; name="$(basename "$env" .env)"
+    # shellcheck disable=SC1090
+    ( . "$env"; printf "%-16s :%-7s %-8s %-8s %s\n" "$name" "$DISP" "$CDP" "$WEB" \
+        "$(systemctl is-active "${PREFIX}-chrome@$name" 2>/dev/null)" )
+  done
+}
+
+cmd_port() {
+  local name="${1:-}"
+  [ -e "$ETC/$name.env" ] || die "no desktop called $name"
+  # shellcheck disable=SC1090
+  ( . "$ETC/$name.env"; echo "$CDP" )
+}
+
+case "${1:-}" in
+  setup) cmd_setup ;;
+  add) shift; cmd_add "$@" ;;
+  remove) shift; cmd_remove "$@" ;;
+  list) cmd_list ;;
+  port) shift; cmd_port "$@" ;;
+  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Desktops</title>
+<!-- agent-desktops portal: shows every desktop from desktops.json (written by `agent-desktops add/remove`).
+     The VNC password is typed once and kept in this browser's localStorage; nothing secret is on the server. -->
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --line:#2a2f3a; --ink:#e6e8ee; --dim:#9aa1b2; --accent:#8b93ff; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font:14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--line);
+    background:var(--panel); position:sticky; top:0; z-index:2; flex-wrap:wrap; }
+  header strong { margin-right:8px; letter-spacing:.02em; }
+  .tab { background:none; color:var(--dim); border:1px solid transparent; border-radius:6px; padding:5px 10px;
+    font:inherit; cursor:pointer; }
+  .tab:hover { color:var(--ink); border-color:var(--line); }
+  .tab[aria-current="true"] { color:var(--ink); border-color:var(--accent); }
+  .spacer { flex:1; }
+  .small { color:var(--dim); font-size:12px; background:none; border:0; cursor:pointer; font:inherit; }
+  .small:hover { color:var(--ink); }
+  main { height:calc(100% - 50px); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(420px, 1fr)); gap:12px; padding:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden;
+    display:flex; flex-direction:column; }
+  .card h2 { margin:0; font-size:14px; font-weight:600; padding:8px 12px; display:flex; align-items:center;
+    gap:8px; border-bottom:1px solid var(--line); }
+  .card h2 span { color:var(--dim); font-weight:400; font-size:12px; }
+  .card h2 button { margin-left:auto; }
+  .btn { background:var(--accent); color:#0f1115; border:0; border-radius:6px; padding:5px 12px;
+    font:inherit; font-weight:600; cursor:pointer; }
+  .card .view { position:relative; aspect-ratio:16/10; cursor:pointer; }
+  .card iframe, .focus iframe { border:0; width:100%; height:100%; display:block; background:#000; }
+  .card .view .hit { position:absolute; inset:0; }  /* click anywhere on a preview to open it */
+  .focus { height:100%; }
+  .gate { max-width:360px; margin:15vh auto; background:var(--panel); border:1px solid var(--line);
+    border-radius:10px; padding:20px; }
+  .gate h1 { font-size:16px; margin:0 0 6px; }
+  .gate p { color:var(--dim); margin:0 0 14px; }
+  .gate input { width:100%; padding:8px 10px; border-radius:6px; border:1px solid var(--line);
+    background:var(--bg); color:var(--ink); font:inherit; margin-bottom:10px; }
+  @media (max-width:640px) { .grid { grid-template-columns:1fr; padding:8px; } }
+</style>
+</head>
+<body>
+<header id="bar" hidden>
+  <strong>Agent desktops</strong>
+  <button class="tab" data-go="all">All</button>
+  <span id="tabs"></span>
+  <span class="spacer"></span>
+  <button class="small" id="forget" title="Clear the saved password from this browser">Forget password</button>
+</header>
+<main id="main"></main>
+
+<script>
+(function () {
+  var KEY = 'agentDesktops.vncPassword';
+  var host = location.hostname;
+  var desktops = [];
+  var main = document.getElementById('main');
+
+  function getPw() { try { return localStorage.getItem(KEY) || ''; } catch (e) { return window.__pw || ''; } }
+  function setPw(v) { try { localStorage.setItem(KEY, v); } catch (e) { window.__pw = v; } }
+
+  function viewerUrl(d, viewOnly) {
+    var q = new URLSearchParams({ host: host, port: String(d.web), path: 'websockify',
+      password: getPw(), scale: 'true', view_only: viewOnly ? 'true' : 'false' });
+    return 'http://' + host + ':' + d.web + '/vnc_lite.html?' + q.toString();
+  }
+
+  function el(tag, attrs, kids) {
+    var e = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(function (k) { if (k === 'text') e.textContent = attrs[k]; else e.setAttribute(k, attrs[k]); });
+    (kids || []).forEach(function (c) { e.appendChild(c); });
+    return e;
+  }
+
+  function markTab(name) {
+    document.querySelectorAll('.tab').forEach(function (t) {
+      t.setAttribute('aria-current', t.getAttribute('data-go') === name ? 'true' : 'false');
+    });
+  }
+
+  function showAll() {
+    main.innerHTML = '';
+    var grid = el('div', { class: 'grid' });
+    desktops.forEach(function (d) {
+      var view = el('div', { class: 'view', title: 'Open ' + d.label },
+        [el('iframe', { src: viewerUrl(d, true), title: d.label + ' (preview)', loading: 'lazy' }), el('div', { class: 'hit' })]);
+      view.addEventListener('click', function () { go(d.name); });
+      var open = el('button', { class: 'btn', text: 'Open' });
+      open.addEventListener('click', function () { go(d.name); });
+      grid.appendChild(el('section', { class: 'card' }, [
+        el('h2', {}, [document.createTextNode(d.label), el('span', { text: d.note || '' }), open]), view]));
+    });
+    main.appendChild(grid);
+    markTab('all');
+  }
+
+  function showOne(d) {
+    main.innerHTML = '';
+    main.appendChild(el('div', { class: 'focus' }, [el('iframe', { src: viewerUrl(d, false), title: d.label })]));
+    markTab(d.name);
+  }
+
+  function go(name) {
+    if (location.hash !== '#' + name) { location.hash = name; return; }  // hashchange calls render
+    render();
+  }
+
+  function render() {
+    var name = location.hash.slice(1) || 'all';
+    var d = desktops.filter(function (x) { return x.name === name; })[0];
+    if (d) showOne(d); else showAll();
+  }
+
+  function gate() {
+    document.getElementById('bar').hidden = true;
+    main.innerHTML = '';
+    var input = el('input', { type: 'password', placeholder: 'Desktop password', autocomplete: 'current-password' });
+    var btn = el('button', { class: 'btn', text: 'Open desktops' });
+    var form = el('form', { class: 'gate' }, [el('h1', { text: 'Agent desktops' }),
+      el('p', { text: 'The VNC password, once. It stays in this browser only.' }), input, btn]);
+    form.addEventListener('submit', function (e) { e.preventDefault(); if (input.value) { setPw(input.value); start(); } });
+    main.appendChild(form);
+    input.focus();
+  }
+
+  function start() {
+    document.getElementById('bar').hidden = false;
+    var tabs = document.getElementById('tabs');
+    tabs.innerHTML = '';
+    desktops.forEach(function (d) { tabs.appendChild(el('button', { class: 'tab', 'data-go': d.name, text: d.label })); });
+    render();
+  }
+
+  document.getElementById('bar').addEventListener('click', function (e) {
+    var t = e.target.closest('[data-go]');
+    if (t) go(t.getAttribute('data-go'));
+  });
+  document.getElementById('forget').addEventListener('click', function () {
+    try { localStorage.removeItem(KEY); } catch (e) { window.__pw = ''; }
+    gate();
+  });
+  window.addEventListener('hashchange', function () {
+    if (!getPw()) return;
+    if (document.getElementById('bar').hidden || !document.getElementById('tabs').children.length) start();
+    else render();
+  });
+
+  fetch('desktops.json', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (list) {
+    desktops = list;
+    if (getPw()) start(); else gate();
+  }).catch(function () { main.textContent = 'Could not load desktops.json'; });
+})();
+</script>
+</body>
+</html>

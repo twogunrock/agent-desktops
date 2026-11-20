@@ -1,0 +1,12 @@
+[Unit]
+Description=@PREFIX@ web view (noVNC) of desktop %i
+After=@PREFIX@-desktop@%i.service
+
+[Service]
+User=@USER@
+EnvironmentFile=@ETC@/%i.env
+ExecStart=/bin/sh -c 'exec /usr/bin/websockify --web /usr/share/novnc ${WEB} localhost:${VNC}'
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

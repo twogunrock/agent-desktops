@@ -1,0 +1,17 @@
+[Unit]
+Description=@PREFIX@ Chrome for %i (visible, own profile, DevTools on localhost)
+After=@PREFIX@-desktop@%i.service
+Requires=@PREFIX@-desktop@%i.service
+
+[Service]
+User=@USER@
+EnvironmentFile=@ETC@/%i.env
+ExecStartPre=/bin/sleep 3
+# Background throttling off: a tab that isn't in front would otherwise run timers slowly
+# and make automated checks flaky.
+ExecStart=/bin/sh -c 'DISPLAY=:${DISP} exec /usr/bin/google-chrome --remote-debugging-port=${CDP} --user-data-dir=@HOME@/.cache/@PREFIX@-chrome-%i --disable-gpu --disable-dev-shm-usage --password-store=basic --no-first-run --no-default-browser-check --start-maximized --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

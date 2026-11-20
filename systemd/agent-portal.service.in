@@ -1,0 +1,11 @@
+[Unit]
+Description=@PREFIX@ portal: one page showing every desktop, port @PORTAL_PORT@
+After=network.target
+
+[Service]
+User=@USER@
+ExecStart=/usr/bin/python3 -m http.server @PORTAL_PORT@ --bind 0.0.0.0 --directory @SHARE@/portal
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=@PREFIX@ desktop %i (virtual X display + VNC on localhost)
+After=network.target
+
+[Service]
+User=@USER@
+WorkingDirectory=@HOME@
+EnvironmentFile=@ETC@/%i.env
+ExecStartPre=-/usr/bin/tigervncserver -kill :${DISP}
+ExecStart=/usr/bin/tigervncserver :${DISP} -fg -localhost yes -geometry 1600x1000 -depth 24 -SecurityTypes VncAuth -PasswordFile @HOME@/.vnc/@PREFIX@-desktops.passwd -xstartup @HOME@/.vnc/@PREFIX@-xstartup -desktop %i
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
