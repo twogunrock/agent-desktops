@@ -65,9 +65,13 @@
   function setPw(v) { try { localStorage.setItem(KEY, v); } catch (e) { window.__pw = v; } }
 
   function viewerUrl(d, viewOnly) {
-    var q = new URLSearchParams({ host: host, port: String(d.web), path: 'websockify',
-      password: getPw(), scale: 'true', view_only: viewOnly ? 'true' : 'false' });
-    return 'http://' + host + ':' + d.web + '/vnc_lite.html?' + q.toString();
+    // noVNC reads query values as strings, so "view_only=false" still counts as on:
+    // the flag is only added for view-only previews. The password goes after '#',
+    // which the browser never sends to the server (noVNC reads both parts).
+    var q = new URLSearchParams({ host: host, port: String(d.web), path: 'websockify', scale: 'true' });
+    if (viewOnly) q.set('view_only', '1');
+    return 'http://' + host + ':' + d.web + '/vnc_lite.html?' + q.toString() +
+      '#x=1&password=' + encodeURIComponent(getPw());
   }
 
   function el(tag, attrs, kids) {
